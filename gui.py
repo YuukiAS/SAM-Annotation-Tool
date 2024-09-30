@@ -37,6 +37,8 @@ class NiftiAnnotationTool(QMainWindow):
 
         # Load Nifti data
         self.nifti_data = None
+        self.affine = None
+        self.header = None
         self.image_for_mask = None
         self.current_mask_idx = 0
         self.reset_annotation()
@@ -214,6 +216,8 @@ class NiftiAnnotationTool(QMainWindow):
         self.masks = [None, None, None]
         self.save_mask_button.setEnabled(False)
         self.nifti_data = nib.load(file_name).get_fdata()
+        self.affine = nib.load(file_name).affine
+        self.header = nib.load(file_name).header.copy()
         if self.nifti_data.ndim not in [3, 4]:
             raise ValueError("Nifti file must have 3 or 4 dimensions")
 
@@ -448,7 +452,8 @@ class NiftiAnnotationTool(QMainWindow):
             filename = f"{self.type}_{self.ID}_0000.nii.gz"
 
             nim_image_path = os.path.join(image_dir, filename)
-            nim_image = nib.Nifti1Image(self.image_for_mask, np.eye(4))
+            nim_image = nib.Nifti1Image(self.image_for_mask, self.affine, self.header)
+            nim_image.header['pixdim'][1:4] = self.header['pixdim'][1:4]
             nib.save(nim_image, nim_image_path)
 
             nim_label_path = os.path.join(label_dir, filename)
@@ -458,7 +463,8 @@ class NiftiAnnotationTool(QMainWindow):
                     continue
                 combined_mask = np.where(mask > 0, idx + 1, combined_mask)
             # rescale the mask
-            nim_label = nib.Nifti1Image(combined_mask, np.eye(4))
+            nim_label = nib.Nifti1Image(combined_mask, self.affine, self.header)
+            nim_label.header['pixdim'][1:4] = self.header['pixdim'][1:4]
             nib.save(nim_label, nim_label_path)
 
             print(f"Image saved as {nim_image_path}. Mask saved as {nim_label_path}")
