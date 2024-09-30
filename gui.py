@@ -4,6 +4,8 @@ import nibabel as nib
 import numpy as np
 import cv2
 import matplotlib.pyplot as plt
+from matplotlib.patches import Rectangle
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from PyQt5.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -19,7 +21,6 @@ from PyQt5.QtWidgets import (
     QMessageBox,
 )
 from PyQt5.QtCore import Qt
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 
 from segment_anything import sam_model_registry, SamPredictor
 
@@ -38,7 +39,7 @@ class NiftiAnnotationTool(QMainWindow):
         self.nifti_data = None
         self.image_for_mask = None
         self.current_mask_idx = 0
-        self.labels = [None, None, None]  # define Annotation points
+        self.reset_annotation()
         self.masks = [None, None, None]  # define Generated masks
         menubar = self.menuBar()
         file_menu = menubar.addMenu("File")
@@ -54,6 +55,7 @@ class NiftiAnnotationTool(QMainWindow):
         # Layout
         layout = QVBoxLayout(central_widget)
         button_layout = QHBoxLayout()
+        segment_layout = QHBoxLayout()
 
         # Create figure and canvas
         self.figure, self.ax = plt.subplots()
@@ -84,11 +86,14 @@ class NiftiAnnotationTool(QMainWindow):
         self.current_timeframe = 0
 
         # Add buttons for label annotation
-        self.annotation_mode = 1
         self.annotate_button = QPushButton("Include/Exclude Point")
         self.annotate_button.clicked.connect(self.set_annotate)
         self.annotate_button.setToolTip("Left click to include, right click to exclude")
         button_layout.addWidget(self.annotate_button)
+
+        self.draw_box_button = QPushButton("Draw Bounding Box")
+        self.draw_box_button.clicked.connect(self.set_draw_box)
+        button_layout.addWidget(self.draw_box_button)
 
         self.erase_button = QPushButton("Erase")
         self.erase_button.clicked.connect(self.set_erase)
@@ -105,9 +110,7 @@ class NiftiAnnotationTool(QMainWindow):
         # Initialize the segment anything model
         self.sam_checkpoint = "model/sam_vit_b_01ec64.pth"
         self.model_type = "vit_b"
-
         self.device = "cpu"
-
         self.sam = sam_model_registry[self.model_type](checkpoint=self.sam_checkpoint)
         self.sam.to(device=self.device)
         self.predictor = SamPredictor(self.sam)
@@ -115,9 +118,15 @@ class NiftiAnnotationTool(QMainWindow):
         # Add button to send the annotation to model
         self.send_button = QPushButton("Segment")
         self.send_button.clicked.connect(self.segment_image)
-        layout.addWidget(self.send_button)
+        segment_layout.addWidget(self.send_button, 3)
 
-        print("Nifti Annotation Tool initialized.")
+        # Add a combo box to switch between masks (up to 3)
+        self.mask_selection = QComboBox()
+        self.mask_selection.addItems(["Mask 1", "Mask 2", "Mask 3"])
+        self.mask_selection.currentIndexChanged.connect(self.switch_mask)
+        segment_layout.addWidget(self.mask_selection, 1)
+
+        layout.addLayout(segment_layout)
 
         # Add button to save mask
         self.save_mask_button = QPushButton("Save Mask")
@@ -125,11 +134,14 @@ class NiftiAnnotationTool(QMainWindow):
         self.save_mask_button.setEnabled(False)
         layout.addWidget(self.save_mask_button)
 
-        # Add a combo box to switch between masks (up to 3)
-        self.mask_selection = QComboBox()
-        self.mask_selection.addItems(["Mask 1", "Mask 2", "Mask 3"])
-        self.mask_selection.currentIndexChanged.connect(self.switch_mask)
-        button_layout.addWidget(self.mask_selection)
+        print("Nifti Annotation Tool initialized.")
+
+    def reset_annotation(self):
+        self.annotation_mode = 1
+        self.label = None
+        # define xyxy format
+        self.box_start = None
+        self.box = None
 
     def visualize_slice(self, new_mask=None):
         self.ax.clear()
@@ -141,8 +153,8 @@ class NiftiAnnotationTool(QMainWindow):
             slice_data = self.nifti_data[:, :, self.current_timeframe]
         self.ax.imshow(slice_data, cmap="gray", origin="lower")
 
-        if self.labels[self.current_mask_idx] is not None:
-            labeled_points = np.where(self.labels[self.current_mask_idx][:, :] == 1)
+        if self.label is not None:
+            labeled_points = np.where(self.label == 1)
             self.ax.scatter(
                 labeled_points[0],
                 labeled_points[1],
@@ -150,7 +162,7 @@ class NiftiAnnotationTool(QMainWindow):
                 s=20,
                 label="Points of Inclusion",
             )
-            labeled_points2 = np.where(self.labels[self.current_mask_idx][:, :] == 2)
+            labeled_points2 = np.where(self.label == 2)
             self.ax.scatter(
                 labeled_points2[0],
                 labeled_points2[1],
@@ -158,6 +170,10 @@ class NiftiAnnotationTool(QMainWindow):
                 s=20,
                 label="Points of Exclusion",
             )
+        if self.box is not None and (
+            self.box.get_width() != 0 or self.box.get_height() != 0
+        ):
+            self.ax.add_patch(self.box)
 
         cmaps = ["cool", "spring", "summer"]  # Different color for each mask
         # Plot other existing masks
@@ -174,6 +190,8 @@ class NiftiAnnotationTool(QMainWindow):
             self.ax.imshow(
                 mask_nan, cmap=cmaps[self.current_mask_idx], alpha=0.5, origin="lower"
             )
+            # Save the generated mask
+            # np.save(f"mask_{self.current_mask_idx}.npy", new_mask)
         self.canvas.draw()
 
     def open_file_dialog(self):
@@ -190,14 +208,15 @@ class NiftiAnnotationTool(QMainWindow):
         # define Format of nii.gz file: LVOT_1094111.nii.gz
         self.ID = file_name.split("/")[-1].split("_")[1].split(".")[0]
         self.type = file_name.split("/")[-1].split("_")[0]
-        self.annotation_mode = 1
+
         self.image_for_mask = None
-        self.labels = [None, None, None]
+        self.reset_annotation()
         self.masks = [None, None, None]
         self.save_mask_button.setEnabled(False)
         self.nifti_data = nib.load(file_name).get_fdata()
         if self.nifti_data.ndim not in [3, 4]:
             raise ValueError("Nifti file must have 3 or 4 dimensions")
+
         # Set slider ranges based on data
         self.time_slider.setMaximum(self.nifti_data.shape[3] - 1)
         self.time_label.setText(
@@ -225,8 +244,15 @@ class NiftiAnnotationTool(QMainWindow):
         self.status_label.setText("Annotation Type: Inclusion/Exclusion")
         print("Select point to include/exclude")
 
-    def set_erase(self):
+    def set_draw_box(self):
         self.annotation_mode = 2
+        self.status_label.setText("Annotation Type: Bounding Box")
+        self.canvas.mpl_connect("button_press_event", self.on_box_click)
+        self.canvas.mpl_connect("motion_notify_event", self.on_box_drag)
+        self.canvas.mpl_connect("button_release_event", self.on_box_release)
+
+    def set_erase(self):
+        self.annotation_mode = 3
         self.status_label.setText("Annotation Type: Erase")
         print("Select point to erase")
 
@@ -234,15 +260,15 @@ class NiftiAnnotationTool(QMainWindow):
         x, y = int(event.xdata), int(event.ydata)
         print(f"Clicked at: ({x}, {y})")
 
-        if self.labels[self.current_mask_idx] is None:
-            self.labels[self.current_mask_idx] = np.zeros(self.nifti_data.shape[:2])
+        if self.label is None:
+            self.label = np.zeros(self.nifti_data.shape[:2])
 
         if self.annotation_mode == 1:
             # Perform annotation if within bounds
             if 0 <= x < self.nifti_data.shape[0] and 0 <= y < self.nifti_data.shape[1]:
-                self.labels[self.current_mask_idx][x, y] = 1 if event.button == 1 else 2
+                self.label[x, y] = 1 if event.button == 1 else 2
                 self.visualize_slice()
-        else:
+        elif self.annotation_mode == 3:
             # Erase the neighborhood of the clicked point
             QApplication.setOverrideCursor(Qt.WaitCursor)
             self.setEnabled(False)
@@ -253,13 +279,50 @@ class NiftiAnnotationTool(QMainWindow):
                         0 <= x + i < self.nifti_data.shape[0]
                         and 0 <= y + j < self.nifti_data.shape[1]
                     ):
-                        self.labels[self.current_mask_idx][x + i, y + j] = 0
-                        self.visualize_slice()
+                        self.label[x + i, y + j] = 0
+            self.visualize_slice()
             self.setEnabled(True)
             QApplication.restoreOverrideCursor()
 
+    def on_box_click(self, event):
+        if self.annotation_mode == 2:
+            self.box_start = (event.xdata, event.ydata)
+            if self.box:
+                self.box.remove()  #
+            self.box = Rectangle(
+                self.box_start,
+                0,
+                0,
+                linewidth=2,
+                edgecolor="orange",
+                facecolor="none",
+                zorder=10,  # prevent box from being hidden by other elements
+            )
+            self.ax.add_patch(self.box)
+            self.canvas.draw()
+
+    def on_box_drag(self, event):
+        if self.annotation_mode == 2 and self.box_start:
+            x, y = event.xdata, event.ydata
+            self.box.set_width(x - self.box_start[0])
+            self.box.set_height(y - self.box_start[1])
+            self.canvas.draw()
+
+    def on_box_release(self, event):
+        if self.annotation_mode == 2:
+            x, y = event.xdata, event.ydata
+            self.box.set_width(x - self.box_start[0])
+            self.box.set_height(y - self.box_start[1])
+            self.canvas.draw()
+            print(
+                f"Bounding box height: {abs(int(self.box.get_height()))}, width: {abs(int(self.box.get_width()))}"
+            )
+            self.annotation_mode = 1
+            self.status_label.setText("Annotation Type: Inclusion/Exclusion")
+
     def switch_mask(self):
         self.current_mask_idx = self.mask_selection.currentIndex()
+        self.reset_annotation()
         print(f"Switching to mask {self.current_mask_idx + 1}")
         self.visualize_slice()
 
@@ -268,33 +331,47 @@ class NiftiAnnotationTool(QMainWindow):
         self.setEnabled(False)
 
         try:
-            if self.labels[self.current_mask_idx] is None:
+            # Preparing input_point and input_label
+
+            if self.label is None and self.box is None:
                 msg = QMessageBox()
                 msg.setIcon(QMessageBox.Information)
-                msg.setText("No input points.")
-                msg.setWindowTitle("Error")
-                msg.setStandardButtons(QMessageBox.Ok)
-                msg.exec_()
-                return
-            input_point = np.where(self.labels[self.current_mask_idx] > 0)
-            if len(input_point[0]) == 0:
-                msg = QMessageBox()
-                msg.setIcon(QMessageBox.Information)
-                msg.setText("No input points.")
+                msg.setText("No input points or bounding box.")
                 msg.setWindowTitle("Error")
                 msg.setStandardButtons(QMessageBox.Ok)
                 msg.exec_()
                 return
 
-            input_point = np.transpose(input_point)
-            print(f"Input points: {input_point}")
+            input_point = None
+            if self.label is not None and np.any(self.label > 0):
+                input_point = np.where(self.label > 0)
 
-            y_coords = input_point[:, 0]
-            x_coords = input_point[:, 1]
-            input_label = self.labels[self.current_mask_idx][y_coords, x_coords]
-            # change value 2 to 0 as point of exclusion
-            input_label[input_label == 2] = 0
-            print(f"Input labels: {input_label}")
+            if input_point is not None:
+                input_point = np.transpose(input_point)
+                print(f"Input points: {input_point}")
+                y_coords = input_point[:, 0]
+                x_coords = input_point[:, 1]
+                input_label = self.label[y_coords, x_coords]
+                # change value 2 to 0 as point of exclusion
+                input_label[input_label == 2] = 0
+                print(f"Input labels: {input_label}")
+
+            # Preparing input_box
+
+            input_box = None
+            if self.box:
+                x0, y0 = self.box_start
+                x1, y1 = (
+                    self.box_start[0] + self.box.get_width(),
+                    self.box_start[1] + self.box.get_height(),
+                )
+                input_box = np.array([int(x0), int(y0), int(x1), int(y1)])
+                # Make sure points are in the correct order
+                if input_box[0] > input_box[2]:
+                    input_box[0], input_box[2] = input_box[2], input_box[0]
+                if input_box[1] > input_box[3]:
+                    input_box[1], input_box[3] = input_box[3], input_box[1]
+                print(f"Input box: {input_box}")
 
             # Segment the image using the SAM model
             if self.nifti_data.ndim == 4:
@@ -321,11 +398,30 @@ class NiftiAnnotationTool(QMainWindow):
             QApplication.processEvents()
 
             print("Predicting masks...")
-            masks, _, _ = self.predictor.predict(
-                point_coords=input_point,
-                point_labels=input_label,
-                multimask_output=True,
-            )
+            if input_box is not None and input_point is not None:
+                masks, _, _ = self.predictor.predict(
+                    point_coords=input_point,
+                    point_labels=input_label,
+                    multimask_output=False,
+                    box=input_box,
+                )
+            elif input_box is not None:
+                masks, _, _ = self.predictor.predict(
+                    point_coords=None,
+                    point_labels=None,
+                    box=input_box[
+                        None, :
+                    ],  # e.g. np.array([425, 600, 700, 875]) -> array([[425, 600, 700, 875]])
+                    multimask_output=False,
+                )
+            elif input_point is not None:
+                masks, _, _ = self.predictor.predict(
+                    point_coords=input_point,
+                    point_labels=input_label,
+                    multimask_output=True,
+                )
+            else:
+                raise ValueError("No input points or bounding box")
             print("Masks predicted.")
 
             # We only need the last mask
@@ -357,7 +453,7 @@ class NiftiAnnotationTool(QMainWindow):
 
             nim_label_path = os.path.join(label_dir, filename)
             combined_mask = np.zeros(self.image_for_mask.shape[:2])
-            for idx, mask in enumerate(self.labels):
+            for idx, mask in enumerate(self.masks):
                 if mask is None:
                     continue
                 combined_mask = np.where(mask > 0, idx + 1, combined_mask)
@@ -368,6 +464,7 @@ class NiftiAnnotationTool(QMainWindow):
             print(f"Image saved as {nim_image_path}. Mask saved as {nim_label_path}")
         else:
             raise ValueError("No image or mask to save")
+
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
