@@ -2,3 +2,4 @@ code
 data
 model
 env_Segment_Anything
+__pycache__
