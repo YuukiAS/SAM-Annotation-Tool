@@ -3,6 +3,7 @@ import os
 import nibabel as nib
 import numpy as np
 import cv2
+from glob import glob
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
@@ -21,19 +22,25 @@ from PyQt5.QtWidgets import (
     QMessageBox,
 )
 from PyQt5.QtCore import Qt
-
+import torch
 from segment_anything import sam_model_registry, SamPredictor
 
 
 class NiftiAnnotationTool(QMainWindow):
-    def __init__(self):
+    def __init__(
+        self, image_dir="data/image", label_dir="data/label", out_dir="data/out"
+    ):
         super().__init__()
 
         self.setWindowTitle("Nifti Annotation Tool")
 
         # Used when creating nibabel files
+        self.file_name = None
         self.ID = None
-        self.type = None
+        self.modality = None
+        self.image_dir = image_dir
+        self.label_dir = label_dir
+        self.out_dir = out_dir  # define The directory that contains the combined files
 
         # Load Nifti data
         self.nifti_data = None
@@ -42,13 +49,30 @@ class NiftiAnnotationTool(QMainWindow):
         self.image_for_mask = None
         self.current_mask_idx = 0
         self.reset_annotation()
-        self.masks = [None, None, None]  # define Generated masks
+        self.masks = [
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ]  # define Generated masks
         menubar = self.menuBar()
         file_menu = menubar.addMenu("File")
 
-        open_file_action = QAction("Open Nifti File", self)
+        open_file_action = QAction("Open a Nifti file", self)
         open_file_action.triggered.connect(self.open_file_dialog)
         file_menu.addAction(open_file_action)
+
+        merge_file_action = QAction("Merge 2D files", self)
+        merge_file_action.triggered.connect(self.merge_2d_files_prepare)
+        file_menu.addAction(merge_file_action)
+
+        delete_file_action = QAction("Delete 2D files", self)
+        delete_file_action.triggered.connect(self.delete_2d_files)
+        file_menu.addAction(delete_file_action)
 
         # Central widget
         central_widget = QWidget(self)
@@ -58,6 +82,7 @@ class NiftiAnnotationTool(QMainWindow):
         layout = QVBoxLayout(central_widget)
         button_layout = QHBoxLayout()
         segment_layout = QHBoxLayout()
+        save_layout = QHBoxLayout()
 
         # Create figure and canvas
         self.figure, self.ax = plt.subplots()
@@ -101,6 +126,10 @@ class NiftiAnnotationTool(QMainWindow):
         self.erase_button.clicked.connect(self.set_erase)
         button_layout.addWidget(self.erase_button)
 
+        self.erase_box_button = QPushButton("Erase Box")
+        self.erase_box_button.clicked.connect(self.set_erase_box)
+        button_layout.addWidget(self.erase_box_button)
+
         self.status_label = QLabel("Annotation Type: Include/Exclude")
         button_layout.addWidget(self.status_label)
 
@@ -112,19 +141,36 @@ class NiftiAnnotationTool(QMainWindow):
         # Initialize the segment anything model
         self.sam_checkpoint = "model/sam_vit_b_01ec64.pth"
         self.model_type = "vit_b"
-        self.device = "cpu"
+        self.device = "cpu" if not torch.cuda.is_available() else "cuda"
+        print(f"Running on device: {self.device}")
         self.sam = sam_model_registry[self.model_type](checkpoint=self.sam_checkpoint)
         self.sam.to(device=self.device)
         self.predictor = SamPredictor(self.sam)
 
         # Add button to send the annotation to model
-        self.send_button = QPushButton("Segment")
-        self.send_button.clicked.connect(self.segment_image)
-        segment_layout.addWidget(self.send_button, 3)
+        self.segment_button = QPushButton("Segment")
+        self.segment_button.clicked.connect(self.segment_image)
+        segment_layout.addWidget(self.segment_button, 3)
 
-        # Add a combo box to switch between masks (up to 3)
+        self.merge_button = QPushButton("Merge Masks")
+        self.merge_button.clicked.connect(self.merge_masks)
+        self.merge_button.setToolTip("Merge all masks into mask 1")
+        segment_layout.addWidget(self.merge_button, 1)
+
+        # Add a combo box to switch between masks (up to 8)
         self.mask_selection = QComboBox()
-        self.mask_selection.addItems(["Mask 1", "Mask 2", "Mask 3"])
+        self.mask_selection.addItems(
+            [
+                "Mask 1",
+                "Mask 2",
+                "Mask 3",
+                "Mask 4",
+                "Mask 5",
+                "Mask 6",
+                "Mask 7",
+                "Mask 8",
+            ]
+        )
         self.mask_selection.currentIndexChanged.connect(self.switch_mask)
         segment_layout.addWidget(self.mask_selection, 1)
 
@@ -134,7 +180,15 @@ class NiftiAnnotationTool(QMainWindow):
         self.save_mask_button = QPushButton("Save Mask")
         self.save_mask_button.clicked.connect(self.save_mask)
         self.save_mask_button.setEnabled(False)
-        layout.addWidget(self.save_mask_button)
+        save_layout.addWidget(self.save_mask_button, 3)
+
+        self.next_subject_button = QPushButton("Next Subject")
+        self.next_subject_button.clicked.connect(self.switch_next_subject)
+        self.next_subject_button.setEnabled(False)
+        self.next_subject_button.setToolTip("Switch to the next subject in the same folder")
+        save_layout.addWidget(self.next_subject_button, 1)
+
+        layout.addLayout(save_layout)
 
         print("Nifti Annotation Tool initialized.")
 
@@ -177,7 +231,18 @@ class NiftiAnnotationTool(QMainWindow):
         ):
             self.ax.add_patch(self.box)
 
-        cmaps = ["cool", "spring", "summer"]  # Different color for each mask
+        # Different color for each mask
+        # cmaps = ["cool", "spring", "summer"]
+        cmaps = [
+            "cool",
+            "spring",
+            "summer",
+            "autumn",
+            "winter",
+            "cividis",
+            "plasma",
+            "twilight",
+        ]
         # Plot other existing masks
         for idx, mask in enumerate(self.masks):
             if idx == self.current_mask_idx or mask is None:
@@ -208,13 +273,15 @@ class NiftiAnnotationTool(QMainWindow):
     def load_nifti_file(self, file_name):
         # Load Nifti file using nibabel
         # define Format of nii.gz file: LVOT_1094111.nii.gz
+        self.file_name = file_name
+        self.setWindowTitle(f"Nifti Annotation Tool: {file_name.split('/')[-1]}")
         self.ID = file_name.split("/")[-1].split("_")[1].split(".")[0]
-        self.type = file_name.split("/")[-1].split("_")[0]
-
+        self.modality = file_name.split("/")[-1].split("_")[0]
         self.image_for_mask = None
         self.reset_annotation()
-        self.masks = [None, None, None]
+        self.masks = [None, None, None, None, None, None, None, None]
         self.save_mask_button.setEnabled(False)
+        self.next_subject_button.setEnabled(True)
         self.nifti_data = nib.load(file_name).get_fdata()
         self.affine = nib.load(file_name).affine
         self.header = nib.load(file_name).header.copy()
@@ -237,10 +304,16 @@ class NiftiAnnotationTool(QMainWindow):
 
     def update_slice(self, value):
         self.current_slice = value
+        self.slice_label.setText(
+            f"Slice: {self.current_slice}/{self.nifti_data.shape[2] - 1}"
+        )
         self.visualize_slice()
 
     def update_timeframe(self, value):
         self.current_timeframe = value
+        self.time_label.setText(
+            f"Timeframe: {self.current_timeframe}/{self.nifti_data.shape[3] - 1}"
+        )
         self.visualize_slice()
 
     def set_annotate(self):
@@ -259,6 +332,13 @@ class NiftiAnnotationTool(QMainWindow):
         self.annotation_mode = 3
         self.status_label.setText("Annotation Type: Erase")
         print("Select point to erase")
+
+    def set_erase_box(self):
+        self.annotation_mode = 1
+        self.status_label.setText("Annotation Type: Inclusion/Exclusion")
+        self.box_start = None
+        self.box = None
+        self.visualize_slice()
 
     def on_click(self, event):
         x, y = int(event.xdata), int(event.ydata)
@@ -442,21 +522,41 @@ class NiftiAnnotationTool(QMainWindow):
             self.setEnabled(True)
             QApplication.processEvents()
 
+    def merge_masks(self):
+        """
+        Merge all existsing masks into mask 1
+        """
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        self.setEnabled(False)
+        QApplication.processEvents()
+
+        combined_mask = np.zeros(self.image_for_mask.shape[:2])
+        for mask in self.masks:
+            if mask is not None:
+                combined_mask = np.where(mask > 0, 1, combined_mask)
+        self.masks[0] = combined_mask
+        for i in range(1, len(self.masks)):
+            self.masks[i] = None
+        self.current_mask_idx = 0
+        self.visualize_slice(new_mask=combined_mask)
+
+        QApplication.restoreOverrideCursor()
+        self.setEnabled(True)
+        QApplication.processEvents()
+
     def save_mask(self):
         if self.image_for_mask is not None:
-            image_dir = "data/image"
-            label_dir = "data/label"
-            os.makedirs(image_dir, exist_ok=True)
-            os.makedirs(label_dir, exist_ok=True)
+            os.makedirs(self.image_dir, exist_ok=True)
+            os.makedirs(self.label_dir, exist_ok=True)
 
-            filename = f"{self.type}_{self.ID}_0000.nii.gz"
+            filename = f"{self.modality}_{self.ID}_{self.current_slice:02}_{self.current_timeframe:02}_0000.nii.gz"
 
-            nim_image_path = os.path.join(image_dir, filename)
+            nim_image_path = os.path.join(self.image_dir, filename)
             nim_image = nib.Nifti1Image(self.image_for_mask, self.affine, self.header)
-            nim_image.header['pixdim'][1:4] = self.header['pixdim'][1:4]
+            nim_image.header["pixdim"][1:4] = self.header["pixdim"][1:4]
             nib.save(nim_image, nim_image_path)
 
-            nim_label_path = os.path.join(label_dir, filename)
+            nim_label_path = os.path.join(self.label_dir, filename)
             combined_mask = np.zeros(self.image_for_mask.shape[:2])
             for idx, mask in enumerate(self.masks):
                 if mask is None:
@@ -464,13 +564,152 @@ class NiftiAnnotationTool(QMainWindow):
                 combined_mask = np.where(mask > 0, idx + 1, combined_mask)
             # rescale the mask
             nim_label = nib.Nifti1Image(combined_mask, self.affine, self.header)
-            nim_label.header['pixdim'][1:4] = self.header['pixdim'][1:4]
+            nim_label.header["pixdim"][1:4] = self.header["pixdim"][1:4]
             nib.save(nim_label, nim_label_path)
 
             print(f"Image saved as {nim_image_path}. Mask saved as {nim_label_path}")
         else:
             raise ValueError("No image or mask to save")
 
+    def merge_2d_files_prepare(self):
+        message_box = QMessageBox()
+        message_box.setIcon(QMessageBox.Information)
+        message_box.setWindowTitle("Merge files of 2D masks")
+
+        if not os.path.exists(self.image_dir) or not os.path.exists(self.label_dir):
+            message_box.setText("No image or label files found.")
+            message_box.setStandardButtons(QMessageBox.Ok)
+            message_box.exec_()
+            return
+
+        nim_image_files = sorted(glob(f"{self.image_dir}/*_*_*_*_0000.nii.gz"))
+        nim_image_files = [os.path.basename(file) for file in nim_image_files]
+        nim_label_files = sorted(glob(f"{self.label_dir}/*_*_*_*_0000.nii.gz"))
+        nim_label_files = [os.path.basename(file) for file in nim_label_files]
+
+        # Select those with both images and labels
+        nim_both_files = [file for file in nim_image_files if file in nim_label_files]
+        message_box.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
+        message_box.setDetailedText(f"{nim_both_files}")
+        message_box.setText(
+            f"Found {len(nim_both_files)} files with both images and labels. \nDo you want to merge them? You can check the detailed text for the file names."
+        )
+        result = message_box.exec_()
+        if result == QMessageBox.Ok:
+            print("Merging files of 2D masks...")
+            self.merge_2d_files_process_all(nim_both_files)
+        else:
+            print("Merge files of 2D masks canceled.")
+
+    def merge_2d_files_process_all(self, nim_both_files):
+        """
+        Merge all files of 2D masks and corresponding images generated by the tool into 3D files.
+        """
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        self.setEnabled(False)
+        QApplication.processEvents()
+
+        os.makedirs(self.out_dir, exist_ok=True)
+        os.makedirs(os.path.join(self.out_dir, "image"), exist_ok=True)
+        os.makedirs(os.path.join(self.out_dir, "label"), exist_ok=True)
+        out_image_dir = os.path.join(self.out_dir, "image")
+        out_label_dir = os.path.join(self.out_dir, "label")
+
+        modalities = [file.split("_")[0] for file in nim_both_files]
+        IDs = [file.split("_")[1] for file in nim_both_files]
+
+        nim_files_single = {}  # define A dictionary that contains all files for a single patient with one modality
+        for modality, ID, file in zip(modalities, IDs, nim_both_files):
+            if (modality, ID) not in nim_files_single:
+                nim_files_single[(modality, ID)] = []
+            nim_files_single[(modality, ID)].append(file)
+
+        for modality, ID in nim_files_single:  # iterate over keys
+            nim_files_single[(modality, ID)] = sorted(nim_files_single[(modality, ID)])
+            nim_image_files_single = [
+                os.path.join(self.image_dir, file)
+                for file in nim_files_single[(modality, ID)]
+            ]
+            nim_label_files_single = [
+                os.path.join(self.label_dir, file)
+                for file in nim_files_single[(modality, ID)]
+            ]
+            self.merge_2d_files_process_single(
+                nim_image_files_single,
+                os.path.join(out_image_dir, f"{modality}_{ID}_image.nii.gz"),
+            )
+            self.merge_2d_files_process_single(
+                nim_label_files_single,
+                os.path.join(out_label_dir, f"{modality}_{ID}_label.nii.gz"),
+            )
+
+        print("All 2D iamges and mask files merged.")
+        self.setEnabled(True)
+        QApplication.restoreOverrideCursor()
+
+    def merge_2d_files_process_single(self, nim_files_single, target_name):
+        """
+        Merge files of 2D images and masks for a single patient with one modality into a 4D file that contains both image and mask.
+        """
+        data_slice_timeframe = {}
+        for file in nim_files_single:
+            nim = nib.load(file)
+            nim_data = nim.get_fdata()
+            slice_idx = int(file.split("_")[2])
+            timeframe_idx = int(file.split("_")[3])
+
+            if timeframe_idx not in data_slice_timeframe:
+                data_slice_timeframe[timeframe_idx] = {}
+            data_slice_timeframe[timeframe_idx][slice_idx] = nim_data
+
+        # Convert dictionary to a list of 3D arrays (x, y, slices) for each timeframe
+        data_timeframe = []
+        for timeframe in sorted(data_slice_timeframe.keys()):
+            slices = [
+                data_slice_timeframe[timeframe][i]
+                for i in sorted(data_slice_timeframe[timeframe].keys())
+            ]
+            data_timeframe.append(np.stack(slices, axis=-1))
+
+        data_combined = np.stack(data_timeframe, axis=-1)
+        affine = nim.affine  # Use the affine from one of the original files
+        header = nim.header.copy()
+
+        nim_combined = nib.Nifti1Image(data_combined, affine, header)
+        nim_combined.header["pixdim"][1:4] = header["pixdim"][1:4]
+        nib.save(nim_combined, target_name)
+
+    def delete_2d_files(self):
+        message_box = QMessageBox()
+        message_box.setIcon(QMessageBox.Warning)
+        message_box.setWindowTitle("Delete files of 2D masks")
+        message_box.setText("Do you want to delete all 2D mask files?")
+        message_box.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
+        result = message_box.exec_()
+        if result == QMessageBox.Ok:
+            print("Deleting all 2D iamges and mask files...")
+            image_files = glob.glob(f"{self.image_dir}/*")
+            label_files = glob.glob(f"{self.label_dir}/*")
+            for file in image_files + label_files:
+                os.remove(file)
+            print("All 2D iamges and mask files deleted.")
+        else:
+            print("Delete 2D iamges and mask files canceled.")
+
+    def switch_next_subject(self):
+        curr_folder = os.path.dirname(self.file_name)
+        files = sorted(glob(f"{curr_folder}/*"))
+        idx = files.index(self.file_name)
+        if idx + 1 < len(files):
+            self.load_nifti_file(files[idx + 1])
+            self.visualize_slice()
+        else:
+            message_box = QMessageBox()
+            message_box.setIcon(QMessageBox.Information)
+            message_box.setWindowTitle("No more files")
+            message_box.setText("No more files in the folder.")
+            message_box.setStandardButtons(QMessageBox.Ok)
+            message_box.exec_()
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
