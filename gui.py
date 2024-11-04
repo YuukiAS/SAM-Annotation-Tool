@@ -20,6 +20,8 @@ from PyQt5.QtWidgets import (
     QPushButton,
     QComboBox,
     QMessageBox,
+    QDialog,
+    QListWidget,
 )
 from PyQt5.QtCore import Qt
 import torch
@@ -53,12 +55,15 @@ class NiftiAnnotationTool(QMainWindow):
             None,
             None,
             None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            # None,
+            # None,
+            # None,
+            # None,
+            # None,
         ]  # define Generated masks
+        self.masks_order = np.arange(
+            len(self.masks)
+        )  # define The order of masks to be saved
         menubar = self.menuBar()
         file_menu = menubar.addMenu("File")
 
@@ -73,6 +78,10 @@ class NiftiAnnotationTool(QMainWindow):
         delete_file_action = QAction("Delete 2D files", self)
         delete_file_action.triggered.connect(self.delete_2d_files)
         file_menu.addAction(delete_file_action)
+
+        specify_mask_order_action = QAction("Specify mask order", self)
+        specify_mask_order_action.triggered.connect(self.specify_mask_order)
+        file_menu.addAction(specify_mask_order_action)
 
         # Central widget
         central_widget = QWidget(self)
@@ -150,7 +159,12 @@ class NiftiAnnotationTool(QMainWindow):
         # Add button to send the annotation to model
         self.segment_button = QPushButton("Segment")
         self.segment_button.clicked.connect(self.segment_image)
-        segment_layout.addWidget(self.segment_button, 3)
+        segment_layout.addWidget(self.segment_button, 6)
+
+        self.hide_button = QPushButton("Hide Masks")
+        self.hide_button.clicked.connect(self.hide_masks)
+        self.hide_button.setToolTip("Merge all masks into mask 1")
+        segment_layout.addWidget(self.hide_button, 1)
 
         self.merge_button = QPushButton("Merge Masks")
         self.merge_button.clicked.connect(self.merge_masks)
@@ -158,21 +172,22 @@ class NiftiAnnotationTool(QMainWindow):
         segment_layout.addWidget(self.merge_button, 1)
 
         # Add a combo box to switch between masks (up to 8)
+        # Modify to add more masks
         self.mask_selection = QComboBox()
         self.mask_selection.addItems(
             [
                 "Mask 1",
                 "Mask 2",
                 "Mask 3",
-                "Mask 4",
-                "Mask 5",
-                "Mask 6",
-                "Mask 7",
-                "Mask 8",
+                # "Mask 4",
+                # "Mask 5",
+                # "Mask 6",
+                # "Mask 7",
+                # "Mask 8",
             ]
         )
         self.mask_selection.currentIndexChanged.connect(self.switch_mask)
-        segment_layout.addWidget(self.mask_selection, 1)
+        segment_layout.addWidget(self.mask_selection, 2)
 
         layout.addLayout(segment_layout)
 
@@ -185,7 +200,9 @@ class NiftiAnnotationTool(QMainWindow):
         self.next_subject_button = QPushButton("Next Subject")
         self.next_subject_button.clicked.connect(self.switch_next_subject)
         self.next_subject_button.setEnabled(False)
-        self.next_subject_button.setToolTip("Switch to the next subject in the same folder")
+        self.next_subject_button.setToolTip(
+            "Switch to the next subject in the same folder"
+        )
         save_layout.addWidget(self.next_subject_button, 1)
 
         layout.addLayout(save_layout)
@@ -199,7 +216,7 @@ class NiftiAnnotationTool(QMainWindow):
         self.box_start = None
         self.box = None
 
-    def visualize_slice(self, new_mask=None):
+    def visualize_slice(self, new_mask=None, hide_mask=False):
         self.ax.clear()
         if self.nifti_data.ndim == 4:
             slice_data = self.nifti_data[
@@ -207,7 +224,7 @@ class NiftiAnnotationTool(QMainWindow):
             ]
         else:
             slice_data = self.nifti_data[:, :, self.current_timeframe]
-        self.ax.imshow(slice_data, cmap="gray", origin="lower")
+        self.ax.imshow(slice_data, cmap="gray", origin="upper")
 
         if self.label is not None:
             labeled_points = np.where(self.label == 1)
@@ -244,18 +261,19 @@ class NiftiAnnotationTool(QMainWindow):
             "twilight",
         ]
         # Plot other existing masks
-        for idx, mask in enumerate(self.masks):
-            if idx == self.current_mask_idx or mask is None:
-                continue
-            mask_nan = np.where(mask == 0, np.nan, mask)
-            mask_nan = mask_nan * 255
-            self.ax.imshow(mask_nan, cmap=cmaps[idx], alpha=0.5, origin="lower")
+        if not hide_mask:
+            for idx, mask in enumerate(self.masks):
+                if idx == self.current_mask_idx or mask is None:
+                    continue
+                mask_nan = np.where(mask == 0, np.nan, mask)
+                mask_nan = mask_nan * 255
+                self.ax.imshow(mask_nan, cmap=cmaps[idx], alpha=0.5, origin="upper")
         # Plot the generated mask
         if new_mask is not None:
             mask_nan = np.where(new_mask == 0, np.nan, new_mask)
             mask_nan = mask_nan * 255
             self.ax.imshow(
-                mask_nan, cmap=cmaps[self.current_mask_idx], alpha=0.5, origin="lower"
+                mask_nan, cmap=cmaps[self.current_mask_idx], alpha=0.5, origin="upper"
             )
             # Save the generated mask
             # np.save(f"mask_{self.current_mask_idx}.npy", new_mask)
@@ -279,7 +297,19 @@ class NiftiAnnotationTool(QMainWindow):
         self.modality = file_name.split("/")[-1].split("_")[0]
         self.image_for_mask = None
         self.reset_annotation()
-        self.masks = [None, None, None, None, None, None, None, None]
+        # Update Mask selection
+        self.current_mask_idx = 0
+        self.mask_selection.setCurrentIndex(0)
+        self.masks = [
+            None,
+            None,
+            None,
+            # None,
+            # None,
+            # None,
+            # None,
+            # None
+        ]
         self.save_mask_button.setEnabled(False)
         self.next_subject_button.setEnabled(True)
         self.nifti_data = nib.load(file_name).get_fdata()
@@ -522,6 +552,12 @@ class NiftiAnnotationTool(QMainWindow):
             self.setEnabled(True)
             QApplication.processEvents()
 
+    def hide_masks(self):
+        """
+        Hide all existing masks
+        """
+        self.visualize_slice(hide_mask=True)
+
     def merge_masks(self):
         """
         Merge all existsing masks into mask 1
@@ -552,17 +588,17 @@ class NiftiAnnotationTool(QMainWindow):
             filename = f"{self.modality}_{self.ID}_{self.current_slice:02}_{self.current_timeframe:02}_0000.nii.gz"
 
             nim_image_path = os.path.join(self.image_dir, filename)
+            # rescale
             nim_image = nib.Nifti1Image(self.image_for_mask, self.affine, self.header)
             nim_image.header["pixdim"][1:4] = self.header["pixdim"][1:4]
             nib.save(nim_image, nim_image_path)
 
             nim_label_path = os.path.join(self.label_dir, filename)
             combined_mask = np.zeros(self.image_for_mask.shape[:2])
-            for idx, mask in enumerate(self.masks):
-                if mask is None:
-                    continue
-                combined_mask = np.where(mask > 0, idx + 1, combined_mask)
-            # rescale the mask
+            for idx in range(len(self.masks_order)):
+                mask = self.masks[self.masks_order[idx]]
+                if mask is not None:
+                    combined_mask = np.where(mask > 0, idx + 1, combined_mask)
             nim_label = nib.Nifti1Image(combined_mask, self.affine, self.header)
             nim_label.header["pixdim"][1:4] = self.header["pixdim"][1:4]
             nib.save(nim_label, nim_label_path)
@@ -710,6 +746,40 @@ class NiftiAnnotationTool(QMainWindow):
             message_box.setText("No more files in the folder.")
             message_box.setStandardButtons(QMessageBox.Ok)
             message_box.exec_()
+
+    def specify_mask_order(self):
+        """
+        Specify the order of masks to be saved. Useful for special annotations ways.
+        For instance, we may first annotate the mask1, and store it in the last so that it will not be covered by mask3.
+        """
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Specify Mask Order")
+
+        list_widget = QListWidget()
+        list_widget.setDragDropMode(QListWidget.InternalMove)
+        for i in range(len(self.masks)):
+            list_widget.addItem(f"Mask {i + 1}")
+
+        button_box = QPushButton("Confirm")
+        button_box.clicked.connect(lambda: self.update_mask_order(list_widget, dialog))
+
+        layout = QVBoxLayout()
+        layout.addWidget(list_widget)
+        layout.addWidget(button_box)
+        dialog.setLayout(layout)
+
+        dialog.exec_()
+
+    def update_mask_order(self, list_widget, dialog):
+        print("Current mask order:", self.masks_order)
+        masks_order = [
+            int(list_widget.item(i).text().split(" ")[1]) - 1
+            for i in range(list_widget.count())
+        ]
+        self.masks_order = np.array(masks_order)
+        print("Updated mask order:", self.masks_order)
+        dialog.accept()
+
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
