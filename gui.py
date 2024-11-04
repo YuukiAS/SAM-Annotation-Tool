@@ -54,13 +54,8 @@ class NiftiAnnotationTool(QMainWindow):
         self.masks = [
             None,
             None,
-            None,
-            # None,
-            # None,
-            # None,
-            # None,
-            # None,
-        ]  # define Generated masks
+            None
+        ]
         self.masks_order = np.arange(
             len(self.masks)
         )  # define The order of masks to be saved
@@ -216,6 +211,16 @@ class NiftiAnnotationTool(QMainWindow):
         self.box_start = None
         self.box = None
 
+    def reset_masks(self):
+        self.masks = [
+            None,
+            None,
+            None
+        ]
+        self.current_mask_idx = 0
+        self.mask_selection.setCurrentIndex(0)
+        
+
     def visualize_slice(self, new_mask=None, hide_mask=False):
         self.ax.clear()
         if self.nifti_data.ndim == 4:
@@ -297,19 +302,7 @@ class NiftiAnnotationTool(QMainWindow):
         self.modality = file_name.split("/")[-1].split("_")[0]
         self.image_for_mask = None
         self.reset_annotation()
-        # Update Mask selection
-        self.current_mask_idx = 0
-        self.mask_selection.setCurrentIndex(0)
-        self.masks = [
-            None,
-            None,
-            None,
-            # None,
-            # None,
-            # None,
-            # None,
-            # None
-        ]
+        self.reset_masks()
         self.save_mask_button.setEnabled(False)
         self.next_subject_button.setEnabled(True)
         self.nifti_data = nib.load(file_name).get_fdata()
@@ -337,6 +330,8 @@ class NiftiAnnotationTool(QMainWindow):
         self.slice_label.setText(
             f"Slice: {self.current_slice}/{self.nifti_data.shape[2] - 1}"
         )
+        self.reset_annotation()
+        self.reset_masks()
         self.visualize_slice()
 
     def update_timeframe(self, value):
@@ -344,6 +339,8 @@ class NiftiAnnotationTool(QMainWindow):
         self.time_label.setText(
             f"Timeframe: {self.current_timeframe}/{self.nifti_data.shape[3] - 1}"
         )
+        self.reset_annotation()
+        self.reset_masks()
         self.visualize_slice()
 
     def set_annotate(self):
@@ -779,7 +776,6 @@ class NiftiAnnotationTool(QMainWindow):
         self.masks_order = np.array(masks_order)
         print("Updated mask order:", self.masks_order)
         dialog.accept()
-
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
