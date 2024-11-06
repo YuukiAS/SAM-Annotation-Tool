@@ -7,6 +7,7 @@ from glob import glob
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from functools import partial
 from PyQt5.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -22,7 +23,9 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QDialog,
     QListWidget,
+    QShortcut,
 )
+from PyQt5.QtGui import QKeySequence
 from PyQt5.QtCore import Qt
 import torch
 from segment_anything import sam_model_registry, SamPredictor
@@ -50,12 +53,7 @@ class NiftiAnnotationTool(QMainWindow):
         self.header = None
         self.image_for_mask = None
         self.current_mask_idx = 0
-        self.reset_annotation()
-        self.masks = [
-            None,
-            None,
-            None
-        ]
+        self.masks = [None, None, None]
         self.masks_order = np.arange(
             len(self.masks)
         )  # define The order of masks to be saved
@@ -66,6 +64,10 @@ class NiftiAnnotationTool(QMainWindow):
         open_file_action.triggered.connect(self.open_file_dialog)
         file_menu.addAction(open_file_action)
 
+        specify_mask_order_action = QAction("Specify mask order", self)
+        specify_mask_order_action.triggered.connect(self.specify_mask_order)
+        file_menu.addAction(specify_mask_order_action)
+
         merge_file_action = QAction("Merge 2D files", self)
         merge_file_action.triggered.connect(self.merge_2d_files_prepare)
         file_menu.addAction(merge_file_action)
@@ -73,10 +75,6 @@ class NiftiAnnotationTool(QMainWindow):
         delete_file_action = QAction("Delete 2D files", self)
         delete_file_action.triggered.connect(self.delete_2d_files)
         file_menu.addAction(delete_file_action)
-
-        specify_mask_order_action = QAction("Specify mask order", self)
-        specify_mask_order_action.triggered.connect(self.specify_mask_order)
-        file_menu.addAction(specify_mask_order_action)
 
         # Central widget
         central_widget = QWidget(self)
@@ -90,7 +88,8 @@ class NiftiAnnotationTool(QMainWindow):
 
         # Create figure and canvas
         self.figure, self.ax = plt.subplots()
-        self.figure.set_size_inches(10, 10)
+        self.figure.tight_layout()
+        self.figure.set_size_inches(20, 20)
         self.canvas = FigureCanvas(self.figure)
         layout.addWidget(self.canvas)
 
@@ -119,22 +118,35 @@ class NiftiAnnotationTool(QMainWindow):
         # Add buttons for label annotation
         self.annotate_button = QPushButton("Include/Exclude Point")
         self.annotate_button.clicked.connect(self.set_annotate)
-        self.annotate_button.setToolTip("Left click to include, right click to exclude")
+        self.annotate_button.setToolTip(
+            "Key Shortcut: 1. Right click for point of exclusion."
+        )
+        self.annotate_button_shortcut = QShortcut(QKeySequence("1"), self)
+        self.annotate_button_shortcut.activated.connect(self.set_annotate)
         button_layout.addWidget(self.annotate_button)
 
         self.draw_box_button = QPushButton("Draw Bounding Box")
         self.draw_box_button.clicked.connect(self.set_draw_box)
+        self.draw_box_button.setToolTip("Key Shortcut: 2")
+        self.draw_box_button_shortcut = QShortcut(QKeySequence("2"), self)
+        self.draw_box_button_shortcut.activated.connect(self.set_draw_box)
         button_layout.addWidget(self.draw_box_button)
 
         self.erase_button = QPushButton("Erase")
-        self.erase_button.clicked.connect(self.set_erase)
+        self.erase_button.clicked.connect(self.set_erase_point)
+        self.erase_button.setToolTip("Key Shortcut: 3")
+        self.erase_button_shortcut = QShortcut(QKeySequence("3"), self)
+        self.erase_button_shortcut.activated.connect(self.set_erase_point)
         button_layout.addWidget(self.erase_button)
 
         self.erase_box_button = QPushButton("Erase Box")
         self.erase_box_button.clicked.connect(self.set_erase_box)
+        self.erase_box_button.setToolTip("Key Shortcut: 4")
+        self.erase_box_button_shortcut = QShortcut(QKeySequence("4"), self)
+        self.erase_box_button_shortcut.activated.connect(self.set_erase_box)
         button_layout.addWidget(self.erase_box_button)
 
-        self.status_label = QLabel("Annotation Type: Include/Exclude")
+        self.status_label = QLabel("Annotation Mode: Include/Exclude")
         button_layout.addWidget(self.status_label)
 
         layout.addLayout(button_layout)
@@ -154,17 +166,26 @@ class NiftiAnnotationTool(QMainWindow):
         # Add button to send the annotation to model
         self.segment_button = QPushButton("Segment")
         self.segment_button.clicked.connect(self.segment_image)
+        self.segment_button.setToolTip("Key Shortcut: S")
+        self.segment_button_shortcut = QShortcut(QKeySequence("S"), self)
+        self.segment_button_shortcut.activated.connect(self.segment_image)
         segment_layout.addWidget(self.segment_button, 6)
 
-        self.hide_button = QPushButton("Hide Masks")
-        self.hide_button.clicked.connect(self.hide_masks)
-        self.hide_button.setToolTip("Merge all masks into mask 1")
-        segment_layout.addWidget(self.hide_button, 1)
+        self.toggle_button = QPushButton("Toggle Masks")
+        self.toggle_button.clicked.connect(self.toggle_masks)
+        self.toggle_button.setToolTip("Key Shortcut: T")
+        self.toggle_button_shortcut = QShortcut(QKeySequence("T"), self)
+        self.toggle_button_shortcut.activated.connect(self.toggle_masks)
+        segment_layout.addWidget(self.toggle_button, 1)
 
-        self.merge_button = QPushButton("Merge Masks")
-        self.merge_button.clicked.connect(self.merge_masks)
-        self.merge_button.setToolTip("Merge all masks into mask 1")
-        segment_layout.addWidget(self.merge_button, 1)
+        self.erase_mask_button = QPushButton(
+            "Erase Mask"
+        )  # Erase pixels of the current mask through clicking
+        self.erase_mask_button.clicked.connect(self.set_erase_mask)
+        self.erase_mask_button.setToolTip("Key Shortcut: E")
+        self.erase_mask_shortcut = QShortcut(QKeySequence("E"), self)
+        self.erase_mask_shortcut.activated.connect(self.set_erase_mask)
+        segment_layout.addWidget(self.erase_mask_button, 1)
 
         # Add a combo box to switch between masks (up to 8)
         # Modify to add more masks
@@ -182,6 +203,9 @@ class NiftiAnnotationTool(QMainWindow):
             ]
         )
         self.mask_selection.currentIndexChanged.connect(self.switch_mask)
+        for i in range(len(self.masks)):
+            mask_shortcut = QShortcut(QKeySequence(f"Ctrl+{i + 1}"), self)
+            mask_shortcut.activated.connect(lambda idx=i: self.mask_selection.setCurrentIndex(idx))
         segment_layout.addWidget(self.mask_selection, 2)
 
         layout.addLayout(segment_layout)
@@ -192,34 +216,45 @@ class NiftiAnnotationTool(QMainWindow):
         self.save_mask_button.setEnabled(False)
         save_layout.addWidget(self.save_mask_button, 3)
 
+        self.merge_button = QPushButton("Merge Masks")
+        self.merge_button.clicked.connect(self.merge_masks)
+        self.merge_button.setToolTip("Merge all masks into mask 1")
+        save_layout.addWidget(self.merge_button, 1)
+
         self.next_subject_button = QPushButton("Next Subject")
         self.next_subject_button.clicked.connect(self.switch_next_subject)
         self.next_subject_button.setEnabled(False)
-        self.next_subject_button.setToolTip(
-            "Switch to the next subject in the same folder"
-        )
+        self.next_subject_button.setToolTip("Key Shortcut: N.")
+        self.next_subject_button_shortcut = QShortcut(QKeySequence("N"), self)
+        self.next_subject_button_shortcut.activated.connect(self.switch_next_subject)
         save_layout.addWidget(self.next_subject_button, 1)
 
         layout.addLayout(save_layout)
 
         print("Nifti Annotation Tool initialized.")
+        self.reset_annotation()
+        self.showMaximized()
 
-    def reset_annotation(self):
-        self.annotation_mode = 1
+    def reset_annotation(self, annotation_mode=1):
         self.label = None
         # define xyxy format
         self.box_start = None
         self.box = None
+        self.annotation_mode = annotation_mode
+        if self.annotation_mode == 1:
+            self.status_label.setText("Annotation Mode: Inclusion/Exclusion")
+        elif self.annotation_mode == 2:
+            self.status_label.setText("Annotation Mode: Bounding Box")
+        elif self.annotation_mode == 3:
+            self.status_label.setText("Annotation Mode: Erase")
+        elif self.annotation_mode == 4:
+            self.status_label.setText("Annotation Mode: Erase Mask")
 
     def reset_masks(self):
-        self.masks = [
-            None,
-            None,
-            None
-        ]
+        self.masks = [None, None, None]
         self.current_mask_idx = 0
         self.mask_selection.setCurrentIndex(0)
-        
+        self.hide_mask = False
 
     def visualize_slice(self, new_mask=None, hide_mask=False):
         self.ax.clear()
@@ -267,27 +302,30 @@ class NiftiAnnotationTool(QMainWindow):
         ]
         # Plot other existing masks
         if not hide_mask:
+            # Plot all other masks
             for idx, mask in enumerate(self.masks):
                 if idx == self.current_mask_idx or mask is None:
                     continue
                 mask_nan = np.where(mask == 0, np.nan, mask)
                 mask_nan = mask_nan * 255
                 self.ax.imshow(mask_nan, cmap=cmaps[idx], alpha=0.5, origin="upper")
-        # Plot the generated mask
-        if new_mask is not None:
-            mask_nan = np.where(new_mask == 0, np.nan, new_mask)
-            mask_nan = mask_nan * 255
-            self.ax.imshow(
-                mask_nan, cmap=cmaps[self.current_mask_idx], alpha=0.5, origin="upper"
-            )
-            # Save the generated mask
-            # np.save(f"mask_{self.current_mask_idx}.npy", new_mask)
+            # Plot the current mask
+            if new_mask is not None:
+                mask_nan = np.where(new_mask == 0, np.nan, new_mask)
+                mask_nan = mask_nan * 255
+                self.ax.imshow(
+                    mask_nan,
+                    cmap=cmaps[self.current_mask_idx],
+                    alpha=0.5,
+                    origin="upper",
+                )
         self.canvas.draw()
 
     def open_file_dialog(self):
         # Open file dialog to select a Nifti file
+        default_directory = "./data/raw/"
         file_name, _ = QFileDialog.getOpenFileName(
-            self, "Open Nifti File", "", "Nifti Files (*.nii *.nii.gz)"
+            self, "Open Nifti File", default_directory, "Nifti Files (*.nii *.nii.gz)"
         )
         if file_name:
             self.load_nifti_file(file_name)
@@ -311,19 +349,32 @@ class NiftiAnnotationTool(QMainWindow):
         if self.nifti_data.ndim not in [3, 4]:
             raise ValueError("Nifti file must have 3 or 4 dimensions")
 
-        # Set slider ranges based on data
-        self.time_slider.setMaximum(self.nifti_data.shape[3] - 1)
-        self.time_label.setText(
-            f"Timeframe: {self.current_timeframe}/{self.nifti_data.shape[3] - 1}"
-        )
-        if len(self.nifti_data.shape) == 4:
+        if self.nifti_data.ndim == 4:
+            self.time_slider.setMaximum(self.nifti_data.shape[3] - 1)
+            self.time_label.setText(
+                f"Timeframe: {self.current_timeframe}/{self.nifti_data.shape[3] - 1}"
+            )
+
             self.slice_slider.setMaximum(self.nifti_data.shape[2] - 1)
             self.slice_label.setText(
                 f"Slice: {self.current_slice}/{self.nifti_data.shape[2] - 1}"
             )
+
+            self.time_slider.setValue(0)
+            self.slice_slider.setValue(0)
+            self.update_timeframe(0)
+            self.update_slice(0)
         else:
+            self.time_slider.setMaximum(self.nifti_data.shape[2] - 1)
+            self.time_label.setText(
+                f"Timeframe: {self.current_timeframe}/{self.nifti_data.shape[2] - 1}"
+            )
+
             self.slice_slider.setMaximum(0)
             self.slice_label.setText("Slice: 0/0")
+
+            self.time_slider.setValue(0)
+            self.update_timeframe(0)
 
     def update_slice(self, value):
         self.current_slice = value
@@ -345,27 +396,36 @@ class NiftiAnnotationTool(QMainWindow):
 
     def set_annotate(self):
         self.annotation_mode = 1
-        self.status_label.setText("Annotation Type: Inclusion/Exclusion")
+        self.status_label.setText("Annotation Mode: Inclusion/Exclusion")
         print("Select point to include/exclude")
 
     def set_draw_box(self):
         self.annotation_mode = 2
-        self.status_label.setText("Annotation Type: Bounding Box")
+        self.status_label.setText("Annotation Mode: Bounding Box")
         self.canvas.mpl_connect("button_press_event", self.on_box_click)
         self.canvas.mpl_connect("motion_notify_event", self.on_box_drag)
         self.canvas.mpl_connect("button_release_event", self.on_box_release)
 
-    def set_erase(self):
+    def set_erase_point(self):
         self.annotation_mode = 3
-        self.status_label.setText("Annotation Type: Erase")
-        print("Select point to erase")
+        self.status_label.setText("Annotation Mode: Erase")
+        print("Select annotation point to erase")
 
     def set_erase_box(self):
         self.annotation_mode = 1
-        self.status_label.setText("Annotation Type: Inclusion/Exclusion")
+        self.status_label.setText("Annotation Mode: Inclusion/Exclusion")
         self.box_start = None
         self.box = None
+        print("Bounding box is erased")
         self.visualize_slice()
+
+    def set_erase_mask(self):
+        """
+        Erase pixels of the current mask through clicking
+        """
+        self.reset_annotation(annotation_mode=4)
+        self.status_label.setText("Annotation Mode: Erase Mask")
+        print("Select mask pixel to erase")
 
     def on_click(self, event):
         x, y = int(event.xdata), int(event.ydata)
@@ -392,6 +452,22 @@ class NiftiAnnotationTool(QMainWindow):
                     ):
                         self.label[x + i, y + j] = 0
             self.visualize_slice()
+            self.setEnabled(True)
+            QApplication.restoreOverrideCursor()
+        elif self.annotation_mode == 4:
+            # Erase the mask of the clicked point
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            self.setEnabled(False)
+            if self.masks[self.current_mask_idx] is not None:
+                for i in range(-2, 3):
+                    for j in range(-2, 3):
+                        if (
+                            0 <= x + i < self.nifti_data.shape[0]
+                            and 0 <= y + j < self.nifti_data.shape[1]
+                        ):
+                            # * Need to swap x and y to erase correctly
+                            self.masks[self.current_mask_idx][y + j, x + i] = 0
+            self.visualize_slice(new_mask=self.masks[self.current_mask_idx])
             self.setEnabled(True)
             QApplication.restoreOverrideCursor()
 
@@ -429,7 +505,7 @@ class NiftiAnnotationTool(QMainWindow):
                 f"Bounding box height: {abs(int(self.box.get_height()))}, width: {abs(int(self.box.get_width()))}"
             )
             self.annotation_mode = 1
-            self.status_label.setText("Annotation Type: Inclusion/Exclusion")
+            self.status_label.setText("Annotation Mode: Inclusion/Exclusion")
 
     def switch_mask(self):
         self.current_mask_idx = self.mask_selection.currentIndex()
@@ -549,11 +625,16 @@ class NiftiAnnotationTool(QMainWindow):
             self.setEnabled(True)
             QApplication.processEvents()
 
-    def hide_masks(self):
+    def toggle_masks(self):
         """
-        Hide all existing masks
+        Toggle visibility of masks.
         """
-        self.visualize_slice(hide_mask=True)
+        print(f"Visibility of masks: {self.hide_mask}")
+        self.hide_mask = not self.hide_mask
+        self.reset_annotation(annotation_mode=4)
+        self.visualize_slice(
+            new_mask=self.masks[self.current_mask_idx], hide_mask=self.hide_mask
+        )
 
     def merge_masks(self):
         """
@@ -776,6 +857,7 @@ class NiftiAnnotationTool(QMainWindow):
         self.masks_order = np.array(masks_order)
         print("Updated mask order:", self.masks_order)
         dialog.accept()
+
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
